@@ -8,6 +8,7 @@ export namespace main {
 	    privateKey: string;
 	    proxyPort: number;
 	    mode: string;
+	    dns: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new ConnectRequest(source);
@@ -22,6 +23,7 @@ export namespace main {
 	        this.privateKey = source["privateKey"];
 	        this.proxyPort = source["proxyPort"];
 	        this.mode = source["mode"];
+	        this.dns = source["dns"];
 	    }
 	}
 	export class ConnectionStatus {

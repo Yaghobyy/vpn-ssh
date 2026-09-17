@@ -25,13 +25,14 @@ func (a *App) startup(ctx context.Context) {
 }
 
 type ConnectRequest struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	Username   string `json:"username"`
-	Password   string `json:"password"`
-	PrivateKey string `json:"privateKey"`
-	ProxyPort  int    `json:"proxyPort"`
-	Mode       string `json:"mode"`
+	Host       string   `json:"host"`
+	Port       int      `json:"port"`
+	Username   string   `json:"username"`
+	Password   string   `json:"password"`
+	PrivateKey string   `json:"privateKey"`
+	ProxyPort  int      `json:"proxyPort"`
+	Mode       string   `json:"mode"`
+	DNS        []string `json:"dns"`
 }
 
 type ConnectionStatus struct {
@@ -49,6 +50,7 @@ func (a *App) Connect(request ConnectRequest) ConnectionStatus {
 		Host: request.Host, Port: request.Port, Username: request.Username,
 		Password: request.Password, PrivateKey: request.PrivateKey, ProxyPort: request.ProxyPort,
 		Mode: request.Mode,
+		DNS:  request.DNS,
 	})
 	return toConnectionStatus(status)
 }

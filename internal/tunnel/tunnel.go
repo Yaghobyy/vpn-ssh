@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"ssh-tunnel/internal/dnsmanager"
 	"ssh-tunnel/internal/fulltunnel"
 	"ssh-tunnel/internal/systemproxy"
 
@@ -27,6 +28,7 @@ type Config struct {
 	PrivateKey string
 	ProxyPort  int
 	Mode       string
+	DNS        []string
 }
 
 type Status struct {
@@ -44,10 +46,11 @@ type Service struct {
 	status   Status
 	proxy    *systemproxy.Manager
 	full     *fulltunnel.Manager
+	dns      *dnsmanager.Manager
 }
 
 func NewService() *Service {
-	return &Service{status: Status{State: "disconnected", Message: "Ready to connect"}, proxy: systemproxy.NewManager(), full: fulltunnel.NewManager()}
+	return &Service{status: Status{State: "disconnected", Message: "Ready to connect"}, proxy: systemproxy.NewManager(), full: fulltunnel.NewManager(), dns: dnsmanager.NewManager()}
 }
 
 func (s *Service) Connect(config Config) Status {
@@ -60,6 +63,9 @@ func (s *Service) Connect(config Config) Status {
 	}
 	if config.Mode == "" {
 		config.Mode = "proxy"
+	}
+	if len(config.DNS) == 0 {
+		config.DNS = []string{"1.1.1.1", "1.0.0.1"}
 	}
 	auth, err := authMethod(config)
 	if err != nil {
@@ -85,10 +91,21 @@ func (s *Service) Connect(config Config) Status {
 			client.Close()
 			return s.setStatus(Status{State: "error", Message: err.Error()})
 		}
+		if err = s.dns.Apply(config.DNS, ""); err != nil {
+			_ = s.full.Stop()
+			listener.Close()
+			client.Close()
+			return s.setStatus(Status{State: "error", Message: fmt.Sprintf("set DNS: %v", err)})
+		}
 	} else if err = s.proxy.Enable(listener.Addr().String()); err != nil {
 		listener.Close()
 		client.Close()
 		return s.setStatus(Status{State: "error", Message: fmt.Sprintf("enable Windows system proxy: %v", err)})
+	} else if err = s.dns.Apply(config.DNS, ""); err != nil {
+		_ = s.proxy.Disable()
+		listener.Close()
+		client.Close()
+		return s.setStatus(Status{State: "error", Message: fmt.Sprintf("set DNS: %v", err)})
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
@@ -114,6 +131,9 @@ func (s *Service) Disconnect() Status {
 	}
 	if client != nil {
 		client.Close()
+	}
+	if err := s.dns.Restore(); err != nil {
+		return s.setStatus(Status{State: "error", Message: fmt.Sprintf("restore DNS: %v", err)})
 	}
 	if err := s.full.Stop(); err != nil {
 		return s.setStatus(Status{State: "error", Message: fmt.Sprintf("stop Full Tunnel: %v", err)})
