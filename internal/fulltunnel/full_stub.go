@@ -7,7 +7,7 @@ import "errors"
 type Manager struct{}
 
 func NewManager() *Manager { return &Manager{} }
-func (*Manager) Start(string, string) error {
+func (*Manager) Start(string, string, bool) error {
 	return errors.New("Full Tunnel is only supported on Windows")
 }
 func (*Manager) Stop() error { return nil }

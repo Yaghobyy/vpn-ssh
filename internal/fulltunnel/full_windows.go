@@ -3,6 +3,7 @@
 package fulltunnel
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -20,18 +21,19 @@ import (
 const adapterName = "SSHTunnel"
 
 type Manager struct {
-	mu         sync.Mutex
-	started    bool
-	routeHost  string
-	routeAdded bool
-	process    *exec.Cmd
-	done       chan error
-	logFile    *os.File
+	mu           sync.Mutex
+	started      bool
+	routeHost    string
+	routeAdded   bool
+	ipv6Disabled []string
+	process      *exec.Cmd
+	done         chan error
+	logFile      *os.File
 }
 
 func NewManager() *Manager { return &Manager{} }
 
-func (m *Manager) Start(proxyAddress, sshHost string) error {
+func (m *Manager) Start(proxyAddress, sshHost string, useIPv6 bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.started {
@@ -51,6 +53,15 @@ func (m *Manager) Start(proxyAddress, sshHost string) error {
 	if net.ParseIP(host) == nil || strings.Contains(host, ":") {
 		return fmt.Errorf("Full Tunnel currently requires an IPv4 VPS address")
 	}
+	ipv6Disabled, err := disableIPv6(!useIPv6)
+	if err != nil {
+		return fmt.Errorf("configure IPv6: %w", err)
+	}
+	defer func() {
+		if !m.started {
+			_ = restoreIPv6(ipv6Disabled)
+		}
+	}()
 	if err := configureRoutes(host); err != nil {
 		return err
 	}
@@ -96,12 +107,13 @@ func (m *Manager) Start(proxyAddress, sshHost string) error {
 		_ = removeRoute(host)
 		return err
 	}
-	if err := configureAdapterRoutes(); err != nil {
+	if err := configureAdapterRoutes(useIPv6); err != nil {
 		_ = process.Process.Kill()
 		logFile.Close()
 		_ = removeRoute(host)
 		return fmt.Errorf("%w (see %s)", err, logPath)
 	}
+	m.ipv6Disabled = ipv6Disabled
 	m.started = true
 	return nil
 }
@@ -151,14 +163,16 @@ func (m *Manager) Stop() error {
 		m.done = nil
 		m.logFile = nil
 	}
-	cleanup := `Get-NetRoute -DestinationPrefix '0.0.0.0/1','128.0.0.0/1' -InterfaceAlias 'SSHTunnel' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue; Get-NetIPAddress -InterfaceAlias 'SSHTunnel' -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue`
+	cleanup := `Get-NetRoute -DestinationPrefix '0.0.0.0/1','128.0.0.0/1','::/1','8000::/1' -InterfaceAlias 'SSHTunnel' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue; Get-NetIPAddress -InterfaceAlias 'SSHTunnel' -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue`
 	if m.routeAdded {
 		cleanup += fmt.Sprintf("; Get-NetRoute -DestinationPrefix '%s/32' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue", m.routeHost)
 	}
 	_ = runPowerShell(cleanup)
+	_ = restoreIPv6(m.ipv6Disabled)
 	m.started = false
 	m.routeHost = ""
 	m.routeAdded = false
+	m.ipv6Disabled = nil
 	return nil
 }
 
@@ -178,10 +192,46 @@ func removeRoute(sshHost string) error {
 	return runPowerShell(fmt.Sprintf("Get-NetRoute -DestinationPrefix '%s/32' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue", sshHost))
 }
 
-func configureAdapterRoutes() error {
+func configureAdapterRoutes(useIPv6 bool) error {
 	script := `if (-not (Get-NetIPAddress -InterfaceAlias 'SSHTunnel' -IPAddress 10.66.0.2 -ErrorAction SilentlyContinue)) { New-NetIPAddress -InterfaceAlias 'SSHTunnel' -IPAddress 10.66.0.2 -PrefixLength 24 -ErrorAction Stop | Out-Null }; if (-not (Get-NetRoute -DestinationPrefix '0.0.0.0/1' -InterfaceAlias 'SSHTunnel' -ErrorAction SilentlyContinue)) { New-NetRoute -DestinationPrefix '0.0.0.0/1' -InterfaceAlias 'SSHTunnel' -NextHop 10.66.0.1 -RouteMetric 5 -ErrorAction Stop | Out-Null }; if (-not (Get-NetRoute -DestinationPrefix '128.0.0.0/1' -InterfaceAlias 'SSHTunnel' -ErrorAction SilentlyContinue)) { New-NetRoute -DestinationPrefix '128.0.0.0/1' -InterfaceAlias 'SSHTunnel' -NextHop 10.66.0.1 -RouteMetric 5 -ErrorAction Stop | Out-Null }`
+	if useIPv6 {
+		script += `; if (-not (Get-NetIPAddress -InterfaceAlias 'SSHTunnel' -IPAddress fd00::2 -ErrorAction SilentlyContinue)) { New-NetIPAddress -InterfaceAlias 'SSHTunnel' -IPAddress fd00::2 -PrefixLength 64 -ErrorAction Stop | Out-Null }; if (-not (Get-NetRoute -DestinationPrefix '::/1' -InterfaceAlias 'SSHTunnel' -ErrorAction SilentlyContinue)) { New-NetRoute -DestinationPrefix '::/1' -InterfaceAlias 'SSHTunnel' -NextHop 'fd00::1' -RouteMetric 5 -ErrorAction Stop | Out-Null }; if (-not (Get-NetRoute -DestinationPrefix '8000::/1' -InterfaceAlias 'SSHTunnel' -ErrorAction SilentlyContinue)) { New-NetRoute -DestinationPrefix '8000::/1' -InterfaceAlias 'SSHTunnel' -NextHop 'fd00::1' -RouteMetric 5 -ErrorAction Stop | Out-Null }`
+	}
 	if err := runPowerShell(script); err != nil {
 		return fmt.Errorf("configure Full Tunnel adapter: %w", err)
+	}
+	return nil
+}
+
+func disableIPv6(disable bool) ([]string, error) {
+	if !disable {
+		return nil, nil
+	}
+	script := `$changed = @(); Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.Name -notlike 'Loopback*' -and $_.Name -ne 'SSHTunnel' } | ForEach-Object { $binding = Get-NetAdapterBinding -Name $_.Name -ComponentID 'ms_tcpip6' -ErrorAction SilentlyContinue; if ($binding -and $binding.Enabled) { Disable-NetAdapterBinding -Name $_.Name -ComponentID 'ms_tcpip6' -Confirm:$false -ErrorAction Stop; $changed += $_.Name } }; $changed | ConvertTo-Json -Compress`
+	output, err := runPowerShellOutput(script)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(output) == "" || strings.TrimSpace(output) == "null" {
+		return nil, nil
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(output), &names); err != nil {
+		var name string
+		if json.Unmarshal([]byte(output), &name) != nil {
+			return nil, fmt.Errorf("parse disabled IPv6 adapters: %w", err)
+		}
+		names = []string{name}
+	}
+	return names, nil
+}
+
+func restoreIPv6(names []string) error {
+	for _, name := range names {
+		script := fmt.Sprintf("Enable-NetAdapterBinding -Name '%s' -ComponentID 'ms_tcpip6' -Confirm:$false -ErrorAction Stop", strings.ReplaceAll(name, "'", "''"))
+		if err := runPowerShell(script); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -205,4 +255,14 @@ func runPowerShell(script string) error {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func runPowerShellOutput(script string) (string, error) {
+	command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
 }

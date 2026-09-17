@@ -33,6 +33,7 @@ type ConnectRequest struct {
 	ProxyPort  int      `json:"proxyPort"`
 	Mode       string   `json:"mode"`
 	DNS        []string `json:"dns"`
+	UseIPv6    bool     `json:"useIPv6"`
 }
 
 type ConnectionStatus struct {
@@ -50,7 +51,7 @@ func (a *App) Connect(request ConnectRequest) ConnectionStatus {
 		Host: request.Host, Port: request.Port, Username: request.Username,
 		Password: request.Password, PrivateKey: request.PrivateKey, ProxyPort: request.ProxyPort,
 		Mode: request.Mode,
-		DNS:  request.DNS,
+		DNS:  request.DNS, UseIPv6: request.UseIPv6,
 	})
 	return toConnectionStatus(status)
 }

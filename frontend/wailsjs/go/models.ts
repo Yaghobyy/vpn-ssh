@@ -9,6 +9,7 @@ export namespace main {
 	    proxyPort: number;
 	    mode: string;
 	    dns: string[];
+	    useIPv6: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ConnectRequest(source);
@@ -24,6 +25,7 @@ export namespace main {
 	        this.proxyPort = source["proxyPort"];
 	        this.mode = source["mode"];
 	        this.dns = source["dns"];
+	        this.useIPv6 = source["useIPv6"];
 	    }
 	}
 	export class ConnectionStatus {

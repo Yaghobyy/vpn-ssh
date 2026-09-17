@@ -12,6 +12,7 @@ document.querySelector('#app').innerHTML = `
         <div class="panel-heading"><div><p class="eyebrow">VPS profile</p><h2>Connection details</h2></div><span class="lock">LOCKED</span></div>
         <div class="mode-tabs"><button type="button" class="mode active" data-mode="proxy"><strong>Proxy</strong><small>System proxy</small></button><button type="button" class="mode" data-mode="full"><strong>Full tunnel</strong><small>All system traffic</small></button></div>
         <label>DNS resolver<select id="dns"><option value="1.1.1.1,1.0.0.1">Cloudflare — 1.1.1.1</option><option value="8.8.8.8,8.8.4.4">Google — 8.8.8.8</option><option value="9.9.9.9,149.112.112.112">Quad9 — 9.9.9.9</option><option value="94.140.14.14,94.140.15.15">AdGuard — 94.140.14.14</option><option value="208.67.222.222,208.67.220.220">OpenDNS — 208.67.222.222</option></select></label>
+        <label class="checkbox"><input id="use-ipv6" type="checkbox"><span>Use IPv6 in Full Tunnel</span></label>
         <label>Host or IP<input id="host" type="text" placeholder="vps.example.com" autocomplete="off" required></label>
         <div class="split"><label>SSH port<input id="port" type="number" value="22" min="1" max="65535"></label><label>Local SOCKS5 port<input id="proxy-port" type="number" value="1080" min="1" max="65535"></label></div>
         <label>Username<input id="username" type="text" placeholder="root" autocomplete="username" required></label>
@@ -69,6 +70,7 @@ form.addEventListener('submit', async (event) => {
       username: document.querySelector('#username').value.trim(), password: method === 'password' ? document.querySelector('#password').value : '',
       privateKey: method === 'key' ? document.querySelector('#private-key').value : '', proxyPort: Number(document.querySelector('#proxy-port').value), mode,
       dns: document.querySelector('#dns').value.split(','),
+      useIPv6: document.querySelector('#use-ipv6').checked,
     });
     showStatus(status);
   } catch (error) { showStatus({state: 'error', message: error.toString()}); }

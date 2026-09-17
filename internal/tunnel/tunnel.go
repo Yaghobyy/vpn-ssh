@@ -29,6 +29,7 @@ type Config struct {
 	ProxyPort  int
 	Mode       string
 	DNS        []string
+	UseIPv6    bool
 }
 
 type Status struct {
@@ -47,6 +48,7 @@ type Service struct {
 	proxy    *systemproxy.Manager
 	full     *fulltunnel.Manager
 	dns      *dnsmanager.Manager
+	dnsProxy *dnsForwarder
 }
 
 func NewService() *Service {
@@ -86,12 +88,21 @@ func (s *Service) Connect(config Config) Status {
 		return s.setStatus(Status{State: "error", Message: fmt.Sprintf("SOCKS5 listener failed: %v", err)})
 	}
 	if config.Mode == "full" {
-		if err = s.full.Start(listener.Addr().String(), config.Host); err != nil {
+		if err = s.full.Start(listener.Addr().String(), config.Host, config.UseIPv6); err != nil {
 			listener.Close()
 			client.Close()
 			return s.setStatus(Status{State: "error", Message: err.Error()})
 		}
-		if err = s.dns.Apply(config.DNS, ""); err != nil {
+		s.dnsProxy, err = startDNSForwarder(client, config.DNS)
+		if err != nil {
+			_ = s.full.Stop()
+			listener.Close()
+			client.Close()
+			return s.setStatus(Status{State: "error", Message: fmt.Sprintf("start DNS forwarder: %v", err)})
+		}
+		if err = s.dns.Apply([]string{"10.66.0.2"}, "SSHTunnel"); err != nil {
+			s.dnsProxy.Close()
+			s.dnsProxy = nil
 			_ = s.full.Stop()
 			listener.Close()
 			client.Close()
@@ -131,6 +142,10 @@ func (s *Service) Disconnect() Status {
 	}
 	if client != nil {
 		client.Close()
+	}
+	if s.dnsProxy != nil {
+		_ = s.dnsProxy.Close()
+		s.dnsProxy = nil
 	}
 	if err := s.dns.Restore(); err != nil {
 		return s.setStatus(Status{State: "error", Message: fmt.Sprintf("restore DNS: %v", err)})
