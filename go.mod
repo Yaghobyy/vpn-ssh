@@ -8,6 +8,7 @@ require (
 	github.com/xjasonlyu/tun2socks/v2 v2.7.0
 	golang.org/x/crypto v0.53.0
 	golang.org/x/sys v0.46.0
+	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
 )
 
 require (
@@ -52,7 +53,6 @@ require (
 	golang.org/x/text v0.39.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446 // indirect
 	gvisor.dev/gvisor v0.0.0-20260701204157-69c2d17aea96 // indirect
 )
 

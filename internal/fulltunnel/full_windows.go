@@ -4,21 +4,29 @@ package fulltunnel
 
 import (
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
-	"github.com/xjasonlyu/tun2socks/v2/engine"
+	wireguardtun "golang.zx2c4.com/wireguard/tun"
 )
 
-const adapterName = "SSH Tunnel"
+const adapterName = "SSHTunnel"
 
 type Manager struct {
 	mu         sync.Mutex
 	started    bool
 	routeHost  string
 	routeAdded bool
+	process    *exec.Cmd
+	done       chan error
+	logFile    *os.File
 }
 
 func NewManager() *Manager { return &Manager{} }
@@ -46,18 +54,83 @@ func (m *Manager) Start(proxyAddress, sshHost string) error {
 	if err := configureRoutes(host); err != nil {
 		return err
 	}
+	wireguardtun.WintunTunnelType = adapterName
+	preflight, err := wireguardtun.CreateTUN(adapterName, 1500)
+	if err != nil {
+		_ = removeRoute(host)
+		return fmt.Errorf("Wintun adapter is unavailable: %w", err)
+	}
+	if err := preflight.Close(); err != nil {
+		_ = removeRoute(host)
+		return fmt.Errorf("close Wintun preflight adapter: %w", err)
+	}
 	m.routeHost = host
 	m.routeAdded = true
 
-	engine.Insert(&engine.Key{
-		Device:    "tun://" + adapterName,
-		Proxy:     "socks5://" + proxyAddress,
-		MTU:       1500,
-		TUNPostUp: `powershell -NoProfile -NonInteractive -Command "New-NetIPAddress -InterfaceAlias 'SSH Tunnel' -IPAddress 10.66.0.2 -PrefixLength 24 -ErrorAction SilentlyContinue; New-NetRoute -DestinationPrefix '0.0.0.0/1' -InterfaceAlias 'SSH Tunnel' -NextHop 10.66.0.1 -RouteMetric 5 -ErrorAction SilentlyContinue; New-NetRoute -DestinationPrefix '128.0.0.0/1' -InterfaceAlias 'SSH Tunnel' -NextHop 10.66.0.1 -RouteMetric 5 -ErrorAction SilentlyContinue"`,
-	})
-	engine.Start()
+	helperPath, err := helperExecutable()
+	if err != nil {
+		_ = removeRoute(host)
+		return err
+	}
+	process := exec.Command(helperPath, "--device", "tun://"+adapterName, "--proxy", "socks5://"+proxyAddress)
+	process.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	logPath := filepath.Join(os.TempDir(), "ssh-tunnel-engine.log")
+	logFile, logErr := os.Create(logPath)
+	if logErr != nil {
+		_ = removeRoute(host)
+		return fmt.Errorf("create tun2socks log: %w", logErr)
+	}
+	process.Stdout, process.Stderr = logFile, logFile
+	if startErr := process.Start(); startErr != nil {
+		_ = logFile.Close()
+		_ = removeRoute(host)
+		return fmt.Errorf("start tun2socks helper: %w", startErr)
+	}
+	m.process = process
+	m.done = make(chan error, 1)
+	m.logFile = logFile
+	go func() { m.done <- process.Wait() }()
+	if err := waitForAdapter(process, m.done, logFile); err != nil {
+		_ = process.Process.Kill()
+		_ = logFile.Close()
+		_ = removeRoute(host)
+		return err
+	}
+	if err := configureAdapterRoutes(); err != nil {
+		_ = process.Process.Kill()
+		logFile.Close()
+		_ = removeRoute(host)
+		return fmt.Errorf("%w (see %s)", err, logPath)
+	}
 	m.started = true
 	return nil
+}
+
+func waitForAdapter(process *exec.Cmd, done <-chan error, logFile *os.File) error {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			return fmt.Errorf("tun2socks helper stopped before adapter was ready: %w: %s", err, readLog(logFile))
+		default:
+		}
+		if err := runPowerShell(`if (-not (Get-NetAdapter -Name 'SSHTunnel' -ErrorAction SilentlyContinue)) { exit 1 }`); err == nil {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("Wintun adapter did not appear within 10 seconds: %s", readLog(logFile))
+}
+
+func readLog(file *os.File) string {
+	if file == nil {
+		return ""
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return ""
+	}
+	contents, _ := io.ReadAll(file)
+	return strings.TrimSpace(string(contents))
 }
 
 func (m *Manager) Stop() error {
@@ -66,8 +139,19 @@ func (m *Manager) Stop() error {
 	if !m.started {
 		return nil
 	}
-	engine.Stop()
-	cleanup := `Get-NetRoute -DestinationPrefix '0.0.0.0/1','128.0.0.0/1' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue; Get-NetIPAddress -InterfaceAlias 'SSH Tunnel' -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue`
+	if m.process != nil && m.process.Process != nil {
+		_ = m.process.Process.Kill()
+		if m.done != nil {
+			<-m.done
+		}
+		if m.logFile != nil {
+			_ = m.logFile.Close()
+		}
+		m.process = nil
+		m.done = nil
+		m.logFile = nil
+	}
+	cleanup := `Get-NetRoute -DestinationPrefix '0.0.0.0/1','128.0.0.0/1' -InterfaceAlias 'SSHTunnel' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue; Get-NetIPAddress -InterfaceAlias 'SSHTunnel' -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue`
 	if m.routeAdded {
 		cleanup += fmt.Sprintf("; Get-NetRoute -DestinationPrefix '%s/32' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue", m.routeHost)
 	}
@@ -75,6 +159,30 @@ func (m *Manager) Stop() error {
 	m.started = false
 	m.routeHost = ""
 	m.routeAdded = false
+	return nil
+}
+
+func helperExecutable() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate application executable: %w", err)
+	}
+	helper := filepath.Join(filepath.Dir(executable), "ssh-tunnel-engine.exe")
+	if _, err = os.Stat(helper); err != nil {
+		return "", fmt.Errorf("tun2socks helper is missing: %s", helper)
+	}
+	return helper, nil
+}
+
+func removeRoute(sshHost string) error {
+	return runPowerShell(fmt.Sprintf("Get-NetRoute -DestinationPrefix '%s/32' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue", sshHost))
+}
+
+func configureAdapterRoutes() error {
+	script := `if (-not (Get-NetIPAddress -InterfaceAlias 'SSHTunnel' -IPAddress 10.66.0.2 -ErrorAction SilentlyContinue)) { New-NetIPAddress -InterfaceAlias 'SSHTunnel' -IPAddress 10.66.0.2 -PrefixLength 24 -ErrorAction Stop | Out-Null }; if (-not (Get-NetRoute -DestinationPrefix '0.0.0.0/1' -InterfaceAlias 'SSHTunnel' -ErrorAction SilentlyContinue)) { New-NetRoute -DestinationPrefix '0.0.0.0/1' -InterfaceAlias 'SSHTunnel' -NextHop 10.66.0.1 -RouteMetric 5 -ErrorAction Stop | Out-Null }; if (-not (Get-NetRoute -DestinationPrefix '128.0.0.0/1' -InterfaceAlias 'SSHTunnel' -ErrorAction SilentlyContinue)) { New-NetRoute -DestinationPrefix '128.0.0.0/1' -InterfaceAlias 'SSHTunnel' -NextHop 10.66.0.1 -RouteMetric 5 -ErrorAction Stop | Out-Null }`
+	if err := runPowerShell(script); err != nil {
+		return fmt.Errorf("configure Full Tunnel adapter: %w", err)
+	}
 	return nil
 }
 
@@ -92,6 +200,7 @@ func isAdministrator() bool {
 
 func runPowerShell(script string) error {
 	command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}

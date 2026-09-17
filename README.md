@@ -27,3 +27,12 @@ wails build
 ```
 
 The executable is generated under `build/bin`.
+
+For Full Tunnel on Windows, keep the official `wintun.dll` (amd64) beside the executable:
+
+```text
+build/bin/vpn ssh.exe
+build/bin/wintun.dll
+```
+
+The build output currently includes Wintun 0.14.1 for Windows amd64.
