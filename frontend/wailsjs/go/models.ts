@@ -1,5 +1,35 @@
 export namespace main {
 	
+	export class AppSettings {
+	    host: string;
+	    port: number;
+	    username: string;
+	    password: string;
+	    privateKey: string;
+	    proxyPort: number;
+	    mode: string;
+	    dns: string[];
+	    useIPv6: boolean;
+	    authMethod: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AppSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.host = source["host"];
+	        this.port = source["port"];
+	        this.username = source["username"];
+	        this.password = source["password"];
+	        this.privateKey = source["privateKey"];
+	        this.proxyPort = source["proxyPort"];
+	        this.mode = source["mode"];
+	        this.dns = source["dns"];
+	        this.useIPv6 = source["useIPv6"];
+	        this.authMethod = source["authMethod"];
+	    }
+	}
 	export class ConnectRequest {
 	    host: string;
 	    port: number;

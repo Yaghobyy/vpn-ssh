@@ -1,7 +1,7 @@
 import './style.css';
 import './app.css';
 
-import {Connect, Disconnect, Status} from '../wailsjs/go/main/App';
+import {Connect, Disconnect, LoadSettings, SaveSettings, Status} from '../wailsjs/go/main/App';
 
 document.querySelector('#app').innerHTML = `
   <main class="shell">
@@ -20,7 +20,7 @@ document.querySelector('#app').innerHTML = `
         <label id="password-field">Password<input id="password" type="password" placeholder="Enter SSH password" autocomplete="current-password"></label>
         <label id="key-field" class="hidden">Private key<textarea id="private-key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
         <button class="connect" id="connect-button" type="submit"><span class="button-dot"></span><span id="button-label">Connect tunnel</span></button>
-        <p class="message" id="message">Credentials stay in memory for this session.</p>
+          <p class="message" id="message">Settings are saved locally; credentials are protected by Windows.</p>
       </form>
     </section>
     <footer class="footer"><span>LOCAL PROXY</span><strong id="proxy-address">127.0.0.1:1080</strong><span class="footer-note">SSH host key verification is disabled in this MVP.</span></footer>
@@ -37,19 +37,75 @@ const keyField = document.querySelector('#key-field');
 let method = 'password';
 let mode = 'proxy';
 let connected = false;
+let settingsSaveTimer;
+
+function setMode(value) {
+  mode = value === 'full' ? 'full' : 'proxy';
+  document.querySelectorAll('.mode').forEach((button) => button.classList.toggle('active', button.dataset.mode === mode));
+}
+
+function setMethod(value) {
+  method = value === 'key' ? 'key' : 'password';
+  document.querySelectorAll('.method').forEach((button) => button.classList.toggle('active', button.dataset.method === method));
+  passwordField.classList.toggle('hidden', method !== 'password');
+  keyField.classList.toggle('hidden', method !== 'key');
+}
+
+function collectSettings() {
+  return {
+    host: document.querySelector('#host').value.trim(),
+    port: Number(document.querySelector('#port').value),
+    username: document.querySelector('#username').value.trim(),
+    password: document.querySelector('#password').value,
+    privateKey: document.querySelector('#private-key').value,
+    proxyPort: Number(document.querySelector('#proxy-port').value),
+    mode,
+    dns: document.querySelector('#dns').value.split(','),
+    useIPv6: document.querySelector('#use-ipv6').checked,
+    authMethod: method,
+  };
+}
+
+function queueSettingsSave() {
+  window.clearTimeout(settingsSaveTimer);
+  settingsSaveTimer = window.setTimeout(() => {
+    SaveSettings(collectSettings()).catch((error) => {
+      message.textContent = `Could not save settings: ${error}`;
+      message.className = 'message error';
+    });
+  }, 250);
+}
+
+function applySettings(settings) {
+  document.querySelector('#host').value = settings.host || '';
+  document.querySelector('#port').value = settings.port || 22;
+  document.querySelector('#username').value = settings.username || '';
+  document.querySelector('#password').value = settings.password || '';
+  document.querySelector('#private-key').value = settings.privateKey || '';
+  document.querySelector('#proxy-port').value = settings.proxyPort || 1080;
+  document.querySelector('#dns').value = (settings.dns || ['1.1.1.1', '1.0.0.1']).join(',');
+  document.querySelector('#use-ipv6').checked = Boolean(settings.useIPv6);
+  setMode(settings.mode);
+  setMethod(settings.authMethod);
+}
 
 document.querySelectorAll('.mode').forEach((button) => button.addEventListener('click', () => {
-  mode = button.dataset.mode;
-  document.querySelectorAll('.mode').forEach((item) => item.classList.toggle('active', item === button));
+  setMode(button.dataset.mode);
   message.textContent = mode === 'full' ? 'Full Tunnel uses Wintun and requires Administrator access.' : 'Windows proxy settings will be restored on disconnect.';
+  queueSettingsSave();
 }));
 
 document.querySelectorAll('.method').forEach((button) => button.addEventListener('click', () => {
-  method = button.dataset.method;
-  document.querySelectorAll('.method').forEach((item) => item.classList.toggle('active', item === button));
-  passwordField.classList.toggle('hidden', method !== 'password');
-  keyField.classList.toggle('hidden', method !== 'key');
+  setMethod(button.dataset.method);
+  queueSettingsSave();
 }));
+
+function handleSettingsChange(event) {
+  queueSettingsSave();
+}
+
+form.addEventListener('input', handleSettingsChange);
+form.addEventListener('change', handleSettingsChange);
 
 function showStatus(status) {
   connected = status.state === 'connected';
@@ -77,4 +133,5 @@ form.addEventListener('submit', async (event) => {
   finally { connectButton.disabled = false; }
 });
 
+LoadSettings().then(applySettings).catch((error) => console.error('Could not load settings:', error));
 Status().then(showStatus).catch(() => {});

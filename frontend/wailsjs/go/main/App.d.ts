@@ -6,4 +6,8 @@ export function Connect(arg1:main.ConnectRequest):Promise<main.ConnectionStatus>
 
 export function Disconnect():Promise<main.ConnectionStatus>;
 
+export function LoadSettings():Promise<main.AppSettings>;
+
+export function SaveSettings(arg1:main.AppSettings):Promise<void>;
+
 export function Status():Promise<main.ConnectionStatus>;
