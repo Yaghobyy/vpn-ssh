@@ -29,6 +29,10 @@ document.querySelector('#app').innerHTML = `
           <div class="traffic-metric"><span class="traffic-label">DOWNLOAD</span><strong id="download-speed">0 B/s</strong></div>
           <div class="traffic-metric"><span class="traffic-label">UPLOAD</span><strong id="upload-speed">0 B/s</strong></div>
         </div>
+        <div class="traffic-totals" aria-live="polite">
+          <div class="traffic-total"><span class="traffic-label">TOTAL DOWNLOADED</span><strong id="download-total">0 B</strong></div>
+          <div class="traffic-total"><span class="traffic-label">TOTAL UPLOADED</span><strong id="upload-total">0 B</strong></div>
+        </div>
         <div class="connection-state"><span class="signal-dot"></span><span id="connection-label">Ready to connect</span></div>
         <p class="connect-hint">SSH TUNNEL</p>
       </div>
@@ -140,9 +144,20 @@ function formatSpeed(bytesPerSecond) {
   return `${(bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`;
 }
 
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 function updateTraffic(status) {
   const downloadElement = document.querySelector('#download-speed');
   const uploadElement = document.querySelector('#upload-speed');
+  const downloadTotalElement = document.querySelector('#download-total');
+  const uploadTotalElement = document.querySelector('#upload-total');
+  downloadTotalElement.textContent = formatBytes(status.downloadBytes || 0);
+  uploadTotalElement.textContent = formatBytes(status.uploadBytes || 0);
   if (status.state !== 'connected') {
     previousTrafficSample = undefined;
     downloadElement.textContent = '0 B/s';
