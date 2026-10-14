@@ -35,6 +35,12 @@ type Manager struct {
 
 func NewManager() *Manager { return &Manager{} }
 
+func (m *Manager) Done() <-chan error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.done
+}
+
 func (m *Manager) Start(proxyAddress, sshHost string, useIPv6 bool) (startErr error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

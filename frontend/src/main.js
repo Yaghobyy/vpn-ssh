@@ -38,6 +38,7 @@ let method = 'password';
 let mode = 'proxy';
 let connected = false;
 let settingsSaveTimer;
+let lastStatus;
 
 function setMode(value) {
   mode = value === 'full' ? 'full' : 'proxy';
@@ -108,6 +109,7 @@ form.addEventListener('input', handleSettingsChange);
 form.addEventListener('change', handleSettingsChange);
 
 function showStatus(status) {
+  lastStatus = status;
   connected = status.state === 'connected';
   connectionLabel.textContent = status.message || status.state;
   message.textContent = status.message || '';
@@ -115,6 +117,14 @@ function showStatus(status) {
   proxyAddress.textContent = status.proxy || `127.0.0.1:${document.querySelector('#proxy-port').value}`;
   buttonLabel.textContent = connected ? 'Disconnect tunnel' : 'Connect tunnel';
   connectButton.classList.toggle('disconnect', connected);
+}
+
+function refreshStatus() {
+  Status().then((status) => {
+    if (!lastStatus || status.state !== lastStatus.state || status.address !== lastStatus.address || status.proxy !== lastStatus.proxy || status.message !== lastStatus.message) {
+      showStatus(status);
+    }
+  }).catch(() => {});
 }
 
 form.addEventListener('submit', async (event) => {
@@ -135,3 +145,4 @@ form.addEventListener('submit', async (event) => {
 
 LoadSettings().then(applySettings).catch((error) => console.error('Could not load settings:', error));
 Status().then(showStatus).catch(() => {});
+window.setInterval(refreshStatus, 1000);

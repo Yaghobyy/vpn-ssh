@@ -40,15 +40,16 @@ type Status struct {
 }
 
 type Service struct {
-	mu       sync.RWMutex
-	client   *ssh.Client
-	listener net.Listener
-	cancel   context.CancelFunc
-	status   Status
-	proxy    *systemproxy.Manager
-	full     *fulltunnel.Manager
-	dns      *dnsmanager.Manager
-	dnsProxy *dnsForwarder
+	lifecycleMu sync.Mutex
+	mu          sync.RWMutex
+	client      *ssh.Client
+	listener    net.Listener
+	cancel      context.CancelFunc
+	status      Status
+	proxy       *systemproxy.Manager
+	full        *fulltunnel.Manager
+	dns         *dnsmanager.Manager
+	dnsProxy    *dnsForwarder
 }
 
 func NewService() *Service {
@@ -56,7 +57,9 @@ func NewService() *Service {
 }
 
 func (s *Service) Connect(config Config) Status {
-	s.Disconnect()
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.disconnectLocked(nil, "Disconnected")
 	if config.Port == 0 {
 		config.Port = 22
 	}
@@ -125,14 +128,29 @@ func (s *Service) Connect(config Config) Status {
 	s.mu.Unlock()
 	go s.acceptLoop(ctx, listener)
 	go s.keepAlive(ctx, client)
+	go s.watchSSH(ctx, client)
+	if config.Mode == "full" {
+		go s.watchFullTunnel(ctx, client, s.full.Done())
+	}
 	return s.Status()
 }
 
 func (s *Service) Disconnect() Status {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return s.disconnectLocked(nil, "Disconnected")
+}
+
+func (s *Service) disconnectLocked(expectedClient *ssh.Client, message string) Status {
 	s.mu.Lock()
+	if expectedClient != nil && s.client != expectedClient {
+		status := s.status
+		s.mu.Unlock()
+		return status
+	}
 	cancel, listener, client := s.cancel, s.listener, s.client
 	s.cancel, s.listener, s.client = nil, nil, nil
-	s.status = Status{State: "disconnected", Message: "Disconnected"}
+	s.status = Status{State: "disconnected", Message: message}
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -157,6 +175,12 @@ func (s *Service) Disconnect() Status {
 		return s.setStatus(Status{State: "error", Message: fmt.Sprintf("restore Windows system proxy: %v", err)})
 	}
 	return s.Status()
+}
+
+func (s *Service) disconnectUnexpected(client *ssh.Client, message string) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.disconnectLocked(client, message)
 }
 
 func (s *Service) Status() Status {
@@ -255,10 +279,40 @@ func (s *Service) keepAlive(ctx context.Context, client *ssh.Client) {
 			return
 		case <-ticker.C:
 			if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-				s.setStatus(Status{State: "error", Message: "SSH connection lost"})
+				s.disconnectUnexpected(client, fmt.Sprintf("SSH connection lost: %v", err))
 				return
 			}
 		}
+	}
+}
+
+func (s *Service) watchSSH(ctx context.Context, client *ssh.Client) {
+	err := client.Wait()
+	if ctx.Err() != nil {
+		return
+	}
+	message := "SSH server closed the connection"
+	if err != nil {
+		message = fmt.Sprintf("SSH connection lost: %v", err)
+	}
+	s.disconnectUnexpected(client, message)
+}
+
+func (s *Service) watchFullTunnel(ctx context.Context, client *ssh.Client, done <-chan error) {
+	if done == nil {
+		return
+	}
+	select {
+	case err, ok := <-done:
+		if ctx.Err() != nil {
+			return
+		}
+		message := "Full Tunnel helper stopped unexpectedly"
+		if ok && err != nil {
+			message = fmt.Sprintf("Full Tunnel helper stopped: %v", err)
+		}
+		s.disconnectUnexpected(client, message)
+	case <-ctx.Done():
 	}
 }
 
