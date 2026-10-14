@@ -8,7 +8,7 @@ document.querySelector('#app').innerHTML = `
     <header class="topbar"><div class="brand"><span class="brand-mark">S</span><span>SSH Tunnel</span></div><span class="phase">PHASE 01 / SOCKS5</span></header>
     <section class="workspace">
       <form class="panel" id="connection-form">
-        <div class="panel-heading"><div><p class="eyebrow">VPS profile</p><h2>Connection details</h2></div><span class="lock">LOCKED</span></div>
+        <div class="panel-heading"><div><p class="eyebrow">VPS profile</p></div><span class="lock">LOCKED</span></div>
         <div class="mode-tabs"><button type="button" class="mode active" data-mode="proxy"><strong>Proxy</strong><small>System proxy</small></button><button type="button" class="mode" data-mode="full"><strong>Full tunnel</strong><small>All system traffic</small></button></div>
         <label>DNS resolver<select id="dns"><option value="1.1.1.1,1.0.0.1">Cloudflare — 1.1.1.1</option><option value="8.8.8.8,8.8.4.4">Google — 8.8.8.8</option><option value="9.9.9.9,149.112.112.112">Quad9 — 9.9.9.9</option><option value="94.140.14.14,94.140.15.15">AdGuard — 94.140.14.14</option><option value="208.67.222.222,208.67.220.220">OpenDNS — 208.67.222.222</option></select></label>
         <label class="checkbox"><input id="use-ipv6" type="checkbox"><span>Use IPv6 in Full Tunnel</span></label>
