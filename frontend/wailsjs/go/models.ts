@@ -63,6 +63,8 @@ export namespace main {
 	    address: string;
 	    proxy: string;
 	    message: string;
+	    uploadBytes: number;
+	    downloadBytes: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new ConnectionStatus(source);
@@ -74,6 +76,8 @@ export namespace main {
 	        this.address = source["address"];
 	        this.proxy = source["proxy"];
 	        this.message = source["message"];
+	        this.uploadBytes = source["uploadBytes"];
+	        this.downloadBytes = source["downloadBytes"];
 	    }
 	}
 

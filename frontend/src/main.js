@@ -25,6 +25,10 @@ document.querySelector('#app').innerHTML = `
           <span class="power-icon" aria-hidden="true">⏻</span>
           <span id="button-label">Connect</span>
         </button>
+        <div class="traffic-metrics" aria-live="polite">
+          <div class="traffic-metric"><span class="traffic-label">DOWNLOAD</span><strong id="download-speed">0 B/s</strong></div>
+          <div class="traffic-metric"><span class="traffic-label">UPLOAD</span><strong id="upload-speed">0 B/s</strong></div>
+        </div>
         <div class="connection-state"><span class="signal-dot"></span><span id="connection-label">Ready to connect</span></div>
         <p class="connect-hint">SSH TUNNEL</p>
       </div>
@@ -46,6 +50,7 @@ let connected = false;
 let isBusy = false;
 let settingsSaveTimer;
 let lastStatus;
+let previousTrafficSample;
 
 function setMode(value) {
   mode = value === 'full' ? 'full' : 'proxy';
@@ -126,6 +131,42 @@ function showStatus(status) {
   buttonLabel.textContent = connected ? 'Disconnect' : 'Connect';
   connectButton.setAttribute('aria-label', connected ? 'Disconnect tunnel' : 'Connect tunnel');
   connectButton.classList.toggle('disconnect', connected);
+  updateTraffic(status);
+}
+
+function formatSpeed(bytesPerSecond) {
+  if (bytesPerSecond < 1024) return `${Math.round(bytesPerSecond)} B/s`;
+  if (bytesPerSecond < 1024 * 1024) return `${(bytesPerSecond / 1024).toFixed(1)} KB/s`;
+  return `${(bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`;
+}
+
+function updateTraffic(status) {
+  const downloadElement = document.querySelector('#download-speed');
+  const uploadElement = document.querySelector('#upload-speed');
+  if (status.state !== 'connected') {
+    previousTrafficSample = undefined;
+    downloadElement.textContent = '0 B/s';
+    uploadElement.textContent = '0 B/s';
+    return;
+  }
+
+  const now = performance.now();
+  let downloadRate = 0;
+  let uploadRate = 0;
+  if (previousTrafficSample) {
+    const elapsed = (now - previousTrafficSample.time) / 1000;
+    if (elapsed > 0) {
+      downloadRate = Math.max(0, status.downloadBytes - previousTrafficSample.downloadBytes) / elapsed;
+      uploadRate = Math.max(0, status.uploadBytes - previousTrafficSample.uploadBytes) / elapsed;
+    }
+  }
+  previousTrafficSample = {
+    time: now,
+    downloadBytes: status.downloadBytes,
+    uploadBytes: status.uploadBytes,
+  };
+  downloadElement.textContent = formatSpeed(downloadRate);
+  uploadElement.textContent = formatSpeed(uploadRate);
 }
 
 function refreshStatus() {
@@ -133,6 +174,8 @@ function refreshStatus() {
   Status().then((status) => {
     if (!lastStatus || status.state !== lastStatus.state || status.address !== lastStatus.address || status.proxy !== lastStatus.proxy || status.message !== lastStatus.message) {
       showStatus(status);
+    } else {
+      updateTraffic(status);
     }
   }).catch(() => {});
 }

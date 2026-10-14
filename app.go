@@ -40,10 +40,12 @@ type ConnectRequest struct {
 }
 
 type ConnectionStatus struct {
-	State   string `json:"state"`
-	Address string `json:"address"`
-	Proxy   string `json:"proxy"`
-	Message string `json:"message"`
+	State         string `json:"state"`
+	Address       string `json:"address"`
+	Proxy         string `json:"proxy"`
+	Message       string `json:"message"`
+	UploadBytes   uint64 `json:"uploadBytes"`
+	DownloadBytes uint64 `json:"downloadBytes"`
 }
 
 type AppSettings struct {
@@ -188,5 +190,8 @@ func (a *App) Status() ConnectionStatus {
 }
 
 func toConnectionStatus(status tunnel.Status) ConnectionStatus {
-	return ConnectionStatus{State: status.State, Address: status.Address, Proxy: status.Proxy, Message: status.Message}
+	return ConnectionStatus{
+		State: status.State, Address: status.Address, Proxy: status.Proxy, Message: status.Message,
+		UploadBytes: status.UploadBytes, DownloadBytes: status.DownloadBytes,
+	}
 }

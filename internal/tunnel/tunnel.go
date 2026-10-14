@@ -33,23 +33,29 @@ type Config struct {
 }
 
 type Status struct {
-	State   string
-	Address string
-	Proxy   string
-	Message string
+	State         string
+	Address       string
+	Proxy         string
+	Message       string
+	UploadBytes   uint64
+	DownloadBytes uint64
 }
 
 type Service struct {
-	lifecycleMu sync.Mutex
-	mu          sync.RWMutex
-	client      *ssh.Client
-	listener    net.Listener
-	cancel      context.CancelFunc
-	status      Status
-	proxy       *systemproxy.Manager
-	full        *fulltunnel.Manager
-	dns         *dnsmanager.Manager
-	dnsProxy    *dnsForwarder
+	lifecycleMu   sync.Mutex
+	mu            sync.RWMutex
+	client        *ssh.Client
+	listener      net.Listener
+	cancel        context.CancelFunc
+	status        Status
+	proxy         *systemproxy.Manager
+	full          *fulltunnel.Manager
+	dns           *dnsmanager.Manager
+	dnsProxy      *dnsForwarder
+	trafficMu     sync.RWMutex
+	trafficClient *ssh.Client
+	uploadBytes   uint64
+	downloadBytes uint64
 }
 
 func NewService() *Service {
@@ -125,6 +131,7 @@ func (s *Service) Connect(config Config) Status {
 	s.mu.Lock()
 	s.client, s.listener, s.cancel = client, listener, cancel
 	s.status = Status{State: "connected", Address: address, Proxy: listener.Addr().String(), Message: "SSH tunnel is active"}
+	s.startTraffic(client)
 	s.mu.Unlock()
 	go s.acceptLoop(ctx, listener)
 	go s.keepAlive(ctx, client)
@@ -151,6 +158,7 @@ func (s *Service) disconnectLocked(expectedClient *ssh.Client, message string) S
 	cancel, listener, client := s.cancel, s.listener, s.client
 	s.cancel, s.listener, s.client = nil, nil, nil
 	s.status = Status{State: "disconnected", Message: message}
+	s.resetTraffic()
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -185,8 +193,53 @@ func (s *Service) disconnectUnexpected(client *ssh.Client, message string) {
 
 func (s *Service) Status() Status {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.status
+	status := s.status
+	s.mu.RUnlock()
+	s.trafficMu.RLock()
+	status.UploadBytes = s.uploadBytes
+	status.DownloadBytes = s.downloadBytes
+	s.trafficMu.RUnlock()
+	return status
+}
+
+func (s *Service) addTraffic(client *ssh.Client, upload bool, count int) {
+	if count <= 0 {
+		return
+	}
+	s.trafficMu.Lock()
+	if s.trafficClient == client {
+		if upload {
+			s.uploadBytes += uint64(count)
+		} else {
+			s.downloadBytes += uint64(count)
+		}
+	}
+	s.trafficMu.Unlock()
+}
+
+func (s *Service) startTraffic(client *ssh.Client) {
+	s.trafficMu.Lock()
+	s.trafficClient = client
+	s.uploadBytes = 0
+	s.downloadBytes = 0
+	s.trafficMu.Unlock()
+}
+
+func (s *Service) resetTraffic() {
+	s.startTraffic(nil)
+}
+
+type trafficCountingWriter struct {
+	destination io.Writer
+	service     *Service
+	client      *ssh.Client
+	upload      bool
+}
+
+func (writer trafficCountingWriter) Write(buffer []byte) (int, error) {
+	count, err := writer.destination.Write(buffer)
+	writer.service.addTraffic(writer.client, writer.upload, count)
+	return count, err
 }
 
 func (s *Service) setStatus(status Status) Status {
@@ -262,8 +315,11 @@ func (s *Service) handleSOCKS5(ctx context.Context, connection net.Conn) {
 	if _, err = connection.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
 	}
-	go func() { _, _ = io.Copy(remote, reader); _ = remote.Close() }()
-	_, _ = io.Copy(connection, remote)
+	go func() {
+		_, _ = io.Copy(trafficCountingWriter{destination: remote, service: s, client: client, upload: true}, reader)
+		_ = remote.Close()
+	}()
+	_, _ = io.Copy(trafficCountingWriter{destination: connection, service: s, client: client}, remote)
 	select {
 	case <-ctx.Done():
 	default:
