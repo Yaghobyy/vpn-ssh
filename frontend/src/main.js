@@ -7,7 +7,6 @@ document.querySelector('#app').innerHTML = `
   <main class="shell">
     <header class="topbar"><div class="brand"><span class="brand-mark">S</span><span>SSH Tunnel</span></div><span class="phase">PHASE 01 / SOCKS5</span></header>
     <section class="workspace">
-      <div class="intro"><p class="eyebrow">Encrypted transport</p><h1>Route your browser<br><em>through SSH.</em></h1><p class="lede">Connect to a VPS and expose a local SOCKS5 proxy. System-wide routing is intentionally not enabled in this first phase.</p><div class="signal"><span class="signal-dot"></span><span id="connection-label">Ready to connect</span></div></div>
       <form class="panel" id="connection-form">
         <div class="panel-heading"><div><p class="eyebrow">VPS profile</p><h2>Connection details</h2></div><span class="lock">LOCKED</span></div>
         <div class="mode-tabs"><button type="button" class="mode active" data-mode="proxy"><strong>Proxy</strong><small>System proxy</small></button><button type="button" class="mode" data-mode="full"><strong>Full tunnel</strong><small>All system traffic</small></button></div>
@@ -19,9 +18,16 @@ document.querySelector('#app').innerHTML = `
         <div class="method-tabs"><button type="button" class="method active" data-method="password">Password</button><button type="button" class="method" data-method="key">Private key</button></div>
         <label id="password-field">Password<input id="password" type="password" placeholder="Enter SSH password" autocomplete="current-password"></label>
         <label id="key-field" class="hidden">Private key<textarea id="private-key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
-        <button class="connect" id="connect-button" type="submit"><span class="button-dot"></span><span id="button-label">Connect tunnel</span></button>
-          <p class="message" id="message">Settings are saved locally; credentials are protected by Windows.</p>
+        <p class="message" id="message">Settings are saved locally; credentials are protected by Windows.</p>
       </form>
+      <div class="connect-stage">
+        <button class="connect" id="connect-button" type="submit" form="connection-form" aria-label="Connect tunnel">
+          <span class="power-icon" aria-hidden="true">⏻</span>
+          <span id="button-label">Connect</span>
+        </button>
+        <div class="connection-state"><span class="signal-dot"></span><span id="connection-label">Ready to connect</span></div>
+        <p class="connect-hint">SSH TUNNEL</p>
+      </div>
     </section>
     <footer class="footer"><span>LOCAL PROXY</span><strong id="proxy-address">127.0.0.1:1080</strong><span class="footer-note">SSH host key verification is disabled in this MVP.</span></footer>
   </main>`;
@@ -37,6 +43,7 @@ const keyField = document.querySelector('#key-field');
 let method = 'password';
 let mode = 'proxy';
 let connected = false;
+let isBusy = false;
 let settingsSaveTimer;
 let lastStatus;
 
@@ -112,14 +119,17 @@ function showStatus(status) {
   lastStatus = status;
   connected = status.state === 'connected';
   connectionLabel.textContent = status.message || status.state;
+  connectionLabel.parentElement.dataset.state = status.state;
   message.textContent = status.message || '';
   message.className = `message ${status.state}`;
   proxyAddress.textContent = status.proxy || `127.0.0.1:${document.querySelector('#proxy-port').value}`;
-  buttonLabel.textContent = connected ? 'Disconnect tunnel' : 'Connect tunnel';
+  buttonLabel.textContent = connected ? 'Disconnect' : 'Connect';
+  connectButton.setAttribute('aria-label', connected ? 'Disconnect tunnel' : 'Connect tunnel');
   connectButton.classList.toggle('disconnect', connected);
 }
 
 function refreshStatus() {
+  if (isBusy) return;
   Status().then((status) => {
     if (!lastStatus || status.state !== lastStatus.state || status.address !== lastStatus.address || status.proxy !== lastStatus.proxy || status.message !== lastStatus.message) {
       showStatus(status);
@@ -129,7 +139,11 @@ function refreshStatus() {
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
+  isBusy = true;
   connectButton.disabled = true;
+  connectButton.classList.add('connecting');
+  buttonLabel.textContent = connected ? 'Stopping' : 'Connecting';
+  connectionLabel.textContent = connected ? 'Disconnecting tunnel' : 'Establishing secure tunnel';
   try {
     const status = connected ? await Disconnect() : await Connect({
       host: document.querySelector('#host').value.trim(), port: Number(document.querySelector('#port').value),
@@ -140,7 +154,11 @@ form.addEventListener('submit', async (event) => {
     });
     showStatus(status);
   } catch (error) { showStatus({state: 'error', message: error.toString()}); }
-  finally { connectButton.disabled = false; }
+  finally {
+    isBusy = false;
+    connectButton.disabled = false;
+    connectButton.classList.remove('connecting');
+  }
 });
 
 LoadSettings().then(applySettings).catch((error) => console.error('Could not load settings:', error));
