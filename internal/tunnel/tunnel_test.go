@@ -3,7 +3,10 @@ package tunnel
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"net"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -52,5 +55,49 @@ func TestTrafficStatsTrackDirectionsAndReset(t *testing.T) {
 	status = service.Status()
 	if status.UploadBytes != 0 || status.DownloadBytes != 0 {
 		t.Fatalf("expected reset traffic totals, got upload=%d download=%d", status.UploadBytes, status.DownloadBytes)
+	}
+}
+
+func TestDialSSHContextCanCancelHandshake(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- connection
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, dialErr := dialSSHContext(ctx, listener.Addr().String(), &ssh.ClientConfig{
+			User: "test", HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second,
+		})
+		result <- dialErr
+	}()
+
+	var serverConnection net.Conn
+	select {
+	case serverConnection = <-accepted:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("SSH TCP connection was not accepted")
+	}
+	defer serverConnection.Close()
+
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("expected canceled SSH handshake to return an error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SSH handshake did not stop after cancellation")
 	}
 }

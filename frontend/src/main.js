@@ -1,7 +1,7 @@
 import './style.css';
 import './app.css';
 
-import {Connect, Disconnect, LoadSettings, SaveSettings, Status} from '../wailsjs/go/main/App';
+import {CancelConnect, Connect, Disconnect, LoadSettings, SaveSettings, Status} from '../wailsjs/go/main/App';
 
 document.querySelector('#app').innerHTML = `
   <main class="shell">
@@ -52,6 +52,8 @@ let method = 'password';
 let mode = 'proxy';
 let connected = false;
 let isBusy = false;
+let busyOperation = '';
+let pendingModeChange = false;
 let settingsSaveTimer;
 let lastStatus;
 let previousTrafficSample;
@@ -107,9 +109,19 @@ function applySettings(settings) {
 }
 
 document.querySelectorAll('.mode').forEach((button) => button.addEventListener('click', () => {
+  if (button.dataset.mode === mode) return;
   setMode(button.dataset.mode);
   message.textContent = mode === 'full' ? 'Full Tunnel uses Wintun and requires Administrator access.' : 'Windows proxy settings will be restored on disconnect.';
   queueSettingsSave();
+  if (busyOperation === 'connect') {
+    pendingModeChange = true;
+    CancelConnect().catch((error) => {
+      message.textContent = `Could not switch mode: ${error}`;
+      message.className = 'message error';
+    });
+  } else if (connected && !isBusy) {
+    connectWithSelectedMode();
+  }
 }));
 
 document.querySelectorAll('.method').forEach((button) => button.addEventListener('click', () => {
@@ -195,27 +207,80 @@ function refreshStatus() {
   }).catch(() => {});
 }
 
-form.addEventListener('submit', async (event) => {
-  event.preventDefault();
+function setBusy(operation, label, connectionMessage) {
   isBusy = true;
+  busyOperation = operation;
   connectButton.disabled = true;
   connectButton.classList.add('connecting');
-  buttonLabel.textContent = connected ? 'Stopping' : 'Connecting';
-  connectionLabel.textContent = connected ? 'Disconnecting tunnel' : 'Establishing secure tunnel';
+  buttonLabel.textContent = label;
+  connectionLabel.textContent = connectionMessage;
+}
+
+function clearBusy() {
+  isBusy = false;
+  busyOperation = '';
+  connectButton.disabled = false;
+  connectButton.classList.remove('connecting');
+}
+
+function connectionRequest(selectedMode) {
+  return {
+    host: document.querySelector('#host').value.trim(),
+    port: Number(document.querySelector('#port').value),
+    username: document.querySelector('#username').value.trim(),
+    password: method === 'password' ? document.querySelector('#password').value : '',
+    privateKey: method === 'key' ? document.querySelector('#private-key').value : '',
+    proxyPort: Number(document.querySelector('#proxy-port').value),
+    mode: selectedMode,
+    dns: document.querySelector('#dns').value.split(','),
+    useIPv6: document.querySelector('#use-ipv6').checked,
+  };
+}
+
+async function connectWithSelectedMode() {
+  if (isBusy || !form.reportValidity()) return;
+  setBusy('connect', 'Connecting', 'Establishing secure tunnel');
+  connectButton.classList.remove('disconnect');
   try {
-    const status = connected ? await Disconnect() : await Connect({
-      host: document.querySelector('#host').value.trim(), port: Number(document.querySelector('#port').value),
-      username: document.querySelector('#username').value.trim(), password: method === 'password' ? document.querySelector('#password').value : '',
-      privateKey: method === 'key' ? document.querySelector('#private-key').value : '', proxyPort: Number(document.querySelector('#proxy-port').value), mode,
-      dns: document.querySelector('#dns').value.split(','),
-      useIPv6: document.querySelector('#use-ipv6').checked,
-    });
-    showStatus(status);
-  } catch (error) { showStatus({state: 'error', message: error.toString()}); }
-  finally {
-    isBusy = false;
-    connectButton.disabled = false;
-    connectButton.classList.remove('connecting');
+    while (true) {
+      const requestedMode = mode;
+      pendingModeChange = false;
+      buttonLabel.textContent = 'Connecting';
+      connectionLabel.textContent = `Connecting in ${requestedMode === 'full' ? 'Full Tunnel' : 'Proxy'} mode`;
+      try {
+        const status = await Connect(connectionRequest(requestedMode));
+        if (pendingModeChange) continue;
+        showStatus(status);
+        break;
+      } catch (error) {
+        if (pendingModeChange) continue;
+        showStatus({state: 'error', message: error.toString()});
+        break;
+      }
+    }
+  } finally {
+    clearBusy();
+  }
+}
+
+async function disconnectCurrent() {
+  if (isBusy) return;
+  setBusy('disconnect', 'Stopping', 'Disconnecting tunnel');
+  try {
+    showStatus(await Disconnect());
+  } catch (error) {
+    showStatus({state: 'error', message: error.toString()});
+  } finally {
+    clearBusy();
+  }
+}
+
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (connected) {
+    await disconnectCurrent();
+  } else {
+    await connectWithSelectedMode();
   }
 });
 

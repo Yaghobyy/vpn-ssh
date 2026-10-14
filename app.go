@@ -181,6 +181,10 @@ func (a *App) Connect(request ConnectRequest) ConnectionStatus {
 	return toConnectionStatus(status)
 }
 
+func (a *App) CancelConnect() {
+	a.service.CancelConnect()
+}
+
 func (a *App) Disconnect() ConnectionStatus {
 	return toConnectionStatus(a.service.Disconnect())
 }

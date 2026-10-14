@@ -43,6 +43,8 @@ type Status struct {
 
 type Service struct {
 	lifecycleMu   sync.Mutex
+	attemptMu     sync.Mutex
+	attemptCancel context.CancelFunc
 	mu            sync.RWMutex
 	client        *ssh.Client
 	listener      net.Listener
@@ -66,6 +68,17 @@ func (s *Service) Connect(config Config) Status {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	s.disconnectLocked(nil, "Disconnected")
+
+	attemptCtx, attemptCancel := context.WithCancel(context.Background())
+	s.attemptMu.Lock()
+	s.attemptCancel = attemptCancel
+	s.attemptMu.Unlock()
+	defer func() {
+		attemptCancel()
+		s.attemptMu.Lock()
+		s.attemptCancel = nil
+		s.attemptMu.Unlock()
+	}()
 	if config.Port == 0 {
 		config.Port = 22
 	}
@@ -83,56 +96,91 @@ func (s *Service) Connect(config Config) Status {
 		return s.setStatus(Status{State: "error", Message: err.Error()})
 	}
 	address := net.JoinHostPort(config.Host, strconv.Itoa(config.Port))
-	client, err := ssh.Dial("tcp", address, &ssh.ClientConfig{
+	client, err := dialSSHContext(attemptCtx, address, &ssh.ClientConfig{
 		User: config.Username, Auth: []ssh.AuthMethod{auth},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 12 * time.Second,
 	})
 	if err != nil {
+		if attemptCtx.Err() != nil {
+			return s.setStatus(Status{State: "disconnected", Message: "Connection attempt canceled"})
+		}
 		return s.setStatus(Status{State: "error", Message: fmt.Sprintf("SSH connection failed: %v", err)})
 	}
+	stopClose := context.AfterFunc(attemptCtx, func() { _ = client.Close() })
+	defer stopClose()
 
 	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(config.ProxyPort)))
 	if err != nil {
 		client.Close()
+		if attemptCtx.Err() != nil {
+			return s.setStatus(Status{State: "disconnected", Message: "Connection attempt canceled"})
+		}
 		return s.setStatus(Status{State: "error", Message: fmt.Sprintf("SOCKS5 listener failed: %v", err)})
 	}
 	if config.Mode == "full" {
 		if err = s.full.Start(listener.Addr().String(), config.Host, config.UseIPv6); err != nil {
-			listener.Close()
-			client.Close()
+			if attemptCtx.Err() != nil {
+				return s.cancelConnectionAttempt(client, listener)
+			}
+			_ = listener.Close()
+			_ = client.Close()
 			return s.setStatus(Status{State: "error", Message: err.Error()})
+		}
+		if attemptCtx.Err() != nil {
+			return s.cancelConnectionAttempt(client, listener)
 		}
 		s.dnsProxy, err = startDNSForwarder(client, config.DNS)
 		if err != nil {
+			if attemptCtx.Err() != nil {
+				return s.cancelConnectionAttempt(client, listener)
+			}
 			_ = s.full.Stop()
-			listener.Close()
-			client.Close()
+			_ = listener.Close()
+			_ = client.Close()
 			return s.setStatus(Status{State: "error", Message: fmt.Sprintf("start DNS forwarder: %v", err)})
 		}
 		if err = s.dns.Apply([]string{"10.66.0.2"}, "SSHTunnel"); err != nil {
-			s.dnsProxy.Close()
+			if attemptCtx.Err() != nil {
+				return s.cancelConnectionAttempt(client, listener)
+			}
+			_ = s.dnsProxy.Close()
 			s.dnsProxy = nil
 			_ = s.full.Stop()
-			listener.Close()
-			client.Close()
+			_ = listener.Close()
+			_ = client.Close()
 			return s.setStatus(Status{State: "error", Message: fmt.Sprintf("set DNS: %v", err)})
 		}
 	} else if err = s.proxy.Enable(listener.Addr().String()); err != nil {
-		listener.Close()
-		client.Close()
+		if attemptCtx.Err() != nil {
+			return s.cancelConnectionAttempt(client, listener)
+		}
+		_ = listener.Close()
+		_ = client.Close()
 		return s.setStatus(Status{State: "error", Message: fmt.Sprintf("enable Windows system proxy: %v", err)})
 	} else if err = s.dns.Apply(config.DNS, ""); err != nil {
+		if attemptCtx.Err() != nil {
+			return s.cancelConnectionAttempt(client, listener)
+		}
 		_ = s.proxy.Disable()
-		listener.Close()
-		client.Close()
+		_ = listener.Close()
+		_ = client.Close()
 		return s.setStatus(Status{State: "error", Message: fmt.Sprintf("set DNS: %v", err)})
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	s.attemptMu.Lock()
+	if attemptCtx.Err() != nil {
+		s.attemptMu.Unlock()
+		cancel()
+		return s.cancelConnectionAttempt(client, listener)
+	}
+	stopClose()
+	s.attemptCancel = nil
 	s.mu.Lock()
 	s.client, s.listener, s.cancel = client, listener, cancel
 	s.status = Status{State: "connected", Address: address, Proxy: listener.Addr().String(), Message: "SSH tunnel is active"}
 	s.startTraffic(client)
 	s.mu.Unlock()
+	s.attemptMu.Unlock()
 	go s.acceptLoop(ctx, listener)
 	go s.keepAlive(ctx, client)
 	go s.watchSSH(ctx, client)
@@ -142,7 +190,60 @@ func (s *Service) Connect(config Config) Status {
 	return s.Status()
 }
 
+func dialSSHContext(ctx context.Context, address string, config *ssh.ClientConfig) (*ssh.Client, error) {
+	dialer := net.Dialer{Timeout: config.Timeout}
+	connection, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	stopClose := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	if config.Timeout > 0 {
+		if err := connection.SetDeadline(time.Now().Add(config.Timeout)); err != nil {
+			stopClose()
+			_ = connection.Close()
+			return nil, err
+		}
+	}
+	sshConnection, channels, requests, err := ssh.NewClientConn(connection, address, config)
+	if err != nil {
+		stopClose()
+		_ = connection.Close()
+		return nil, err
+	}
+	if err := connection.SetDeadline(time.Time{}); err != nil {
+		stopClose()
+		_ = sshConnection.Close()
+		return nil, err
+	}
+	if ctx.Err() != nil {
+		stopClose()
+		_ = sshConnection.Close()
+		return nil, ctx.Err()
+	}
+	stopClose()
+	return ssh.NewClient(sshConnection, channels, requests), nil
+}
+
+func (s *Service) CancelConnect() {
+	s.attemptMu.Lock()
+	if s.attemptCancel != nil {
+		s.attemptCancel()
+	}
+	s.attemptMu.Unlock()
+}
+
+func (s *Service) cancelConnectionAttempt(client *ssh.Client, listener net.Listener) Status {
+	if listener != nil {
+		_ = listener.Close()
+	}
+	if client != nil {
+		_ = client.Close()
+	}
+	return s.disconnectLocked(nil, "Connection attempt canceled")
+}
+
 func (s *Service) Disconnect() Status {
+	s.CancelConnect()
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	return s.disconnectLocked(nil, "Disconnected")
